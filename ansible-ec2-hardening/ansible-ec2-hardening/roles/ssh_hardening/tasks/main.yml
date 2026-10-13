@@ -1,0 +1,106 @@
+---
+- name: Validate existing SSH configuration before any edit
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -t, -f, "{{ ssh_hardening_config }}"]
+  changed_when: false
+  check_mode: false
+
+- name: Read original configuration for rollback
+  ansible.builtin.slurp:
+    src: "{{ ssh_hardening_config }}"
+  register: ssh_hardening_original
+
+- name: Capture connection context from the remote SSH session
+  become: false
+  ansible.builtin.shell: 'printf "%s" "$SSH_CONNECTION"'
+  register: ssh_hardening_connection
+  changed_when: false
+  check_mode: false
+
+- name: Require an SSH session for effective Match-block checks
+  ansible.builtin.assert:
+    that: ssh_hardening_connection.stdout.split() | length == 4
+    fail_msg: SSH_CONNECTION must be available to validate the source address and port.
+
+- name: Construct current administrator and root validation contexts
+  ansible.builtin.set_fact:
+    ssh_hardening_contexts:
+      - "user={{ ansible_user }},host={{ ssh_hardening_connection.stdout.split()[0] }},addr={{ ssh_hardening_connection.stdout.split()[0] }},laddr={{ ssh_hardening_connection.stdout.split()[2] }},lport={{ ssh_hardening_connection.stdout.split()[3] }}"
+      - "user=root,host={{ ssh_hardening_connection.stdout.split()[0] }},addr={{ ssh_hardening_connection.stdout.split()[0] }},laddr={{ ssh_hardening_connection.stdout.split()[2] }},lport={{ ssh_hardening_connection.stdout.split()[3] }}"
+
+- name: Install and verify SSH baseline with reachable-error rollback
+  block:
+    - name: Insert first-value hardening block before Includes and other settings
+      ansible.builtin.blockinfile:
+        path: "{{ ssh_hardening_config }}"
+        insertbefore: BOF
+        marker: '# {mark} ANSIBLE EC2 SSH HARDENING'
+        block: "{{ lookup('ansible.builtin.template', 'hardening.conf.j2') }}"
+        owner: root
+        group: root
+        mode: '0600'
+        backup: true
+        validate: '/usr/sbin/sshd -t -f %s'
+      register: ssh_hardening_edit
+
+    - name: Read effective configuration for administrator and root
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -f
+          - "{{ ssh_hardening_config }}"
+          - -C
+          - "{{ item }}"
+      loop: "{{ ssh_hardening_contexts }}"
+      register: ssh_hardening_effective
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Check managed directives against effective settings
+      ansible.builtin.include_tasks: verify.yml
+      loop: "{{ ssh_hardening_effective.results | default([]) }}"
+      loop_control:
+        loop_var: ssh_context_result
+      when: not ansible_check_mode
+
+    - name: Reload SSH only after syntax and effective-settings checks pass
+      ansible.builtin.systemd_service:
+        name: "{{ ssh_hardening_service }}"
+        state: reloaded
+      when:
+        - not ansible_check_mode
+        - ssh_hardening_edit.changed
+
+  rescue:
+    - name: Restore original SSH file
+      ansible.builtin.copy:
+        content: "{{ ssh_hardening_original.content | b64decode }}"
+        dest: "{{ ssh_hardening_config }}"
+        owner: root
+        group: root
+        mode: '0600'
+        validate: '/usr/sbin/sshd -t -f %s'
+      when: not ansible_check_mode
+
+    - name: Reload restored SSH configuration
+      ansible.builtin.systemd_service:
+        name: "{{ ssh_hardening_service }}"
+        state: reloaded
+      when: not ansible_check_mode
+
+    - name: Stop rollout after SSH validation or reload failure
+      ansible.builtin.fail:
+        msg: >-
+          SSH hardening failed; original content restored on this reachable host.
+          Inspect conflicting Match blocks or service configuration before retrying.
+
+- name: Verify fresh key-based SSH access before configuring other roles
+  when: not ansible_check_mode
+  block:
+    - name: Reset persistent SSH session
+      ansible.builtin.meta: reset_connection
+    - name: Reconnect as the non-root deployment user
+      ansible.builtin.wait_for_connection:
+        delay: 2
+        timeout: 90

@@ -1,0 +1,10 @@
+---
+hardening_environment: prod
+hardening_batch_size: 1
+fail2ban_bantime: 3600
+fail2ban_findtime: 600
+fail2ban_maxretry: 5
+# Replace with exact controller/bastion source IPs for this environment.
+fail2ban_trusted_ips: []
+ssh_allow_tcp_forwarding: false
+ssh_allow_agent_forwarding: false

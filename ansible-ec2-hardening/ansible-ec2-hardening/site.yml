@@ -1,0 +1,66 @@
+---
+- name: Harden Ubuntu and RHEL EC2 fleet
+  hosts: ec2_fleet
+  become: true
+  gather_facts: true
+  serial: "{{ hardening_batch_size | default(1) }}"
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Validate selected environment variables
+      ansible.builtin.assert:
+        that:
+          - hardening_environment | default('') in ['dev', 'uat', 'prod']
+        fail_msg: Select inventory/dev, inventory/uat or inventory/prod/hosts.yml.
+      tags: [always]
+
+    - name: Validate supported systems and SSH deployment identity
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ansible_facts.distribution == 'Ubuntu' and
+             ansible_facts.distribution_version in ['22.04', '24.04']) or
+            (ansible_facts.distribution == 'RedHat' and
+             ansible_facts.distribution_major_version in ['8', '9'])
+          - ansible_facts.service_mgr == 'systemd'
+          - ansible_connection | default('ssh') in ['ssh', 'paramiko']
+          - ansible_user is defined
+          - ansible_user != 'root'
+        fail_msg: Use a non-root SSH user with sudo on Ubuntu 22.04/24.04 or RHEL 8/9.
+      tags: [always]
+
+    - name: Confirm privilege escalation works
+      ansible.builtin.command: id -u
+      register: hardening_sudo
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: Require root privileges through sudo
+      ansible.builtin.assert:
+        that: hardening_sudo.stdout == '0'
+      tags: [always]
+
+  roles:
+    - role: ssh_hardening
+      tags: [ssh]
+    - role: fail2ban
+      tags: [fail2ban]
+    - role: automatic_updates
+      tags: [updates]
+
+  post_tasks:
+    - name: Apply pending service changes before proceeding to next host
+      ansible.builtin.meta: flush_handlers
+      tags: [always]
+
+    - name: Close existing SSH connection to test new authentication
+      ansible.builtin.meta: reset_connection
+      when: not ansible_check_mode
+      tags: [always]
+
+    - name: Verify fresh connection and Python execution
+      ansible.builtin.wait_for_connection:
+        delay: 2
+        timeout: 90
+      when: not ansible_check_mode
+      tags: [always]

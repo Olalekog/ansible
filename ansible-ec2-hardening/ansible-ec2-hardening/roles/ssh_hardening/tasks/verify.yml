@@ -1,0 +1,11 @@
+---
+- name: Verify each effective SSH directive for this context
+  ansible.builtin.assert:
+    that:
+      - (item.key ~ ' ' ~ (item.value | lower)) in (ssh_context_result.stdout | lower).splitlines()
+    fail_msg: >-
+      Expected {{ item.key }}={{ item.value }} for {{ ssh_context_result.item }}.
+      An existing Match block or external policy may override the baseline.
+  loop: "{{ ssh_hardening_expected | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

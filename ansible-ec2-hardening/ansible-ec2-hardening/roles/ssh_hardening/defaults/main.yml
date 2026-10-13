@@ -1,0 +1,28 @@
+---
+ssh_allow_tcp_forwarding: false
+ssh_allow_agent_forwarding: false
+ssh_hardening_config: /etc/ssh/sshd_config
+ssh_hardening_service: "{{ 'ssh' if ansible_facts.distribution == 'Ubuntu' else 'sshd' }}"
+ssh_hardening_expected:
+  permitrootlogin: 'no'
+  passwordauthentication: 'no'
+  kbdinteractiveauthentication: 'no'
+  pubkeyauthentication: 'yes'
+  permitemptypasswords: 'no'
+  hostbasedauthentication: 'no'
+  ignorerhosts: 'yes'
+  x11forwarding: 'no'
+  allowtcpforwarding: "{{ 'yes' if ssh_allow_tcp_forwarding | bool else 'no' }}"
+  allowagentforwarding: "{{ 'yes' if ssh_allow_agent_forwarding | bool else 'no' }}"
+  allowstreamlocalforwarding: 'no'
+  permittunnel: 'no'
+  permituserenvironment: 'no'
+  strictmodes: 'yes'
+  maxauthtries: '3'
+  maxsessions: '4'
+  maxstartups: '10:30:60'
+  logingracetime: '30'
+  clientaliveinterval: '300'
+  clientalivecountmax: '2'
+  usepam: 'yes'
+  loglevel: 'VERBOSE'

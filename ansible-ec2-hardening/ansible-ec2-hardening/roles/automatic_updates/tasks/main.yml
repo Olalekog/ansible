@@ -1,0 +1,8 @@
+---
+- name: Configure Ubuntu security updates
+  ansible.builtin.include_tasks: ubuntu.yml
+  when: ansible_facts.distribution == 'Ubuntu'
+
+- name: Configure RHEL security updates
+  ansible.builtin.include_tasks: rhel.yml
+  when: ansible_facts.distribution == 'RedHat'

@@ -1,0 +1,5 @@
+---
+# Common role defaults provide the SSH baseline for every environment.
+# Put environment-specific overrides in inventory/<env>/group_vars/all.yml.
+# Values here take precedence over inventory variables; avoid duplicating them.
+{}

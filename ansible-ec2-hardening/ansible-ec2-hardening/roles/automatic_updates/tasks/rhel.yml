@@ -1,0 +1,43 @@
+---
+- name: Install DNF automatic
+  ansible.builtin.dnf:
+    name: dnf-automatic
+    state: present
+
+- name: Configure automatic security-only installation without reboot
+  ansible.builtin.copy:
+    dest: /etc/dnf/automatic.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: true
+    content: |
+      # Managed by Ansible; requires security advisory metadata in repositories.
+      [commands]
+      upgrade_type = security
+      download_updates = yes
+      apply_updates = yes
+      random_sleep = 300
+      reboot = never
+      [emitters]
+      emit_via = stdio
+      [base]
+      debuglevel = 1
+
+- name: Disable competing DNF automatic timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - dnf-automatic.timer
+    - dnf-automatic-download.timer
+    - dnf-automatic-notifyonly.timer
+  when: not ansible_check_mode
+
+- name: Enable DNF automatic installation timer
+  ansible.builtin.systemd_service:
+    name: dnf-automatic-install.timer
+    enabled: true
+    state: started
+  when: not ansible_check_mode

@@ -1,0 +1,11 @@
+# Managed by Ansible. No logpath with systemd journal backend.
+[sshd]
+enabled = true
+backend = systemd
+port = {{ fail2ban_connection.stdout.split()[3] }}
+banaction = {{ fail2ban_banaction }}
+maxretry = {{ fail2ban_maxretry }}
+findtime = {{ fail2ban_findtime }}
+bantime = {{ fail2ban_bantime }}
+ignoreip = 127.0.0.1/8 ::1{% for ip in fail2ban_trusted_ips %} {{ ip }}{% endfor %}
+
