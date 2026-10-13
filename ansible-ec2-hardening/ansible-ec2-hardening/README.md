@@ -28,6 +28,180 @@ that might conflict with FIPS or newer policies. Review those policies against
 your selected CIS profile. Keepalive settings detect unresponsive clients;
 they do not guarantee an interactive idle-session timeout.
 
+## What is in this folder
+
+```text
+ansible-ec2-hardening/
+├── ansible.cfg                  Ansible settings for this project
+├── site.yml                     The playbook: checks, the three roles, a final reconnect
+├── group_vars/
+│   └── ec2_fleet.yml            Empty on purpose (see below)
+├── inventory/
+│   ├── dev/                     One folder per environment, never combined
+│   │   ├── hosts.yml            Which servers, and the user to log in as
+│   │   └── group_vars/all.yml   That environment's settings
+│   ├── uat/                     Same two files
+│   └── prod/                    Same two files
+├── roles/
+│   ├── ssh_hardening/           Locks down sshd, with rollback
+│   ├── fail2ban/                Bans addresses that keep failing to log in
+│   └── automatic_updates/       Installs security updates daily, without rebooting
+├── tests/                       Offline checks; they never connect to a server
+├── README.md                    This file
+└── VALIDATION.md                What was and was not tested before delivery
+```
+
+### `ansible.cfg`
+
+Read automatically when a command is run from this folder.
+
+| Setting | Effect |
+|---|---|
+| `inventory = inventory/dev/hosts.yml` | A command with no `-i` works on dev. UAT and prod must be chosen explicitly, so they cannot be reached by forgetting a flag. |
+| `roles_path = roles` | Roles are looked up in `roles/`. |
+| `host_key_checking = True` | A server whose host key is not already in `known_hosts` is refused. |
+| `retry_files_enabled = False` | No `.retry` files are left behind after a failed run. |
+| `interpreter_python = auto_silent` | Ansible finds Python on each server by itself, without a warning. |
+| `pipelining = True` | Fewer SSH round trips per task, so runs are faster. |
+
+### `site.yml`
+
+The one playbook. It targets the `ec2_fleet` group with sudo (`become: true`)
+and works through the servers in batches of `hardening_batch_size`
+(`serial`). With `any_errors_fatal: true`, a failure on any server ends the
+run, so later batches are never touched.
+
+1. **Checks before anything is changed** (`pre_tasks`, tagged `always` so they
+   run even with `--tags`):
+   - the inventory in use sets `hardening_environment` to `dev`, `uat` or `prod`;
+   - the server is Ubuntu 22.04/24.04 or RHEL 8/9, uses systemd, is reached
+     over SSH, and the login user is set and is not `root`;
+   - sudo really gives root (`id -u` returns `0`).
+2. **The roles**, in this order, each with a tag to run it by itself:
+   `ssh_hardening` (`ssh`), `fail2ban` (`fail2ban`), `automatic_updates`
+   (`updates`).
+3. **Checks afterwards** (`post_tasks`): pending service restarts are applied,
+   the SSH connection is closed, and a new one is opened. A server that can no
+   longer be logged in to fails here, before the next batch starts.
+
+### `group_vars/ec2_fleet.yml`
+
+Contains only `{}`: it sets nothing. Variables in a `group_vars` folder next to
+the playbook outrank the ones in `inventory/<env>/group_vars/all.yml`, so a
+value written here would silently replace what each environment chose. Leave it
+empty unless a value must be identical everywhere and no environment may change
+it.
+
+### `inventory/`
+
+Each environment has the same two files.
+
+**`hosts.yml`** lists the servers. `ec2_fleet` is the parent group the playbook
+targets; under it are `ubuntu` (login user `ubuntu`) and `rhel` (login user
+`ec2-user`). Each ships with one example server per group, named
+`<env>-ubuntu-canary` and `<env>-rhel-canary`. The addresses are placeholders:
+
+| Environment | Ubuntu example | RHEL example |
+|---|---|---|
+| dev | 10.10.1.10 | 10.10.2.10 |
+| uat | 10.20.1.10 | 10.20.2.10 |
+| prod | 10.30.1.10 | 10.30.2.10 |
+
+**`group_vars/all.yml`** holds that environment's settings. The values are in
+the table under [Dev, UAT and prod variables](#dev-uat-and-prod-variables).
+
+| Variable | Meaning |
+|---|---|
+| `hardening_environment` | Names the environment. The playbook refuses to run without it. |
+| `hardening_batch_size` | How many servers are changed at a time. |
+| `fail2ban_maxretry`, `fail2ban_findtime` | This many failed logins within this many seconds triggers a ban. |
+| `fail2ban_bantime` | How long a ban lasts, in seconds. |
+| `fail2ban_trusted_ips` | Addresses that are never banned. Empty as shipped; fill in your controller and bastion. |
+| `ssh_allow_tcp_forwarding`, `ssh_allow_agent_forwarding` | Whether SSH forwarding is allowed. Both `false`. |
+
+### `roles/ssh_hardening/`
+
+| File | Purpose |
+|---|---|
+| `defaults/main.yml` | The baseline. `ssh_hardening_expected` is the list of sshd settings and the value each must have; it is used both to write the configuration and to check it afterwards. Also the path of `sshd_config` and the service name (`ssh` on Ubuntu, `sshd` on RHEL). |
+| `templates/hardening.conf.j2` | Turns that list into `setting value` lines. |
+| `tasks/main.yml` | Applies the baseline safely (steps below). |
+| `tasks/verify.yml` | Compares every expected setting with what sshd reports as in effect, and fails naming the first one that differs. |
+
+What `tasks/main.yml` does:
+
+1. Checks that the existing `sshd_config` is valid (`sshd -t`), so an already
+   broken file is not blamed on this playbook.
+2. Reads the whole file into memory, to be able to put it back.
+3. Reads `SSH_CONNECTION` from the session to learn the address and port in
+   use, and builds two test cases from it: the login user and `root`.
+4. Inserts the settings as a marked block at the very top of `sshd_config`.
+   The file is only replaced if the result passes `sshd -t`, and a backup copy
+   is kept.
+5. Asks sshd what would actually apply to each of the two test cases
+   (`sshd -T -C`) and runs `verify.yml` on the answers. This is what catches a
+   `Match` block that overrides the baseline.
+6. Reloads sshd, only if the file changed and every check passed.
+7. If any of steps 4 to 6 fails: restores the original file, reloads sshd, and
+   stops the run.
+8. Drops the SSH connection and reconnects, proving key-based login still
+   works before the other roles run.
+
+### `roles/fail2ban/`
+
+| File | Purpose |
+|---|---|
+| `defaults/main.yml` | Fallback values: five failures in 600 seconds, a 3600-second ban, no trusted addresses, bans applied with `nftables-multiport`. The inventories override the ban time for dev and UAT. |
+| `templates/sshd.local.j2` | The `[sshd]` jail: reads the systemd journal, watches the port SSH is really on, and never bans loopback or the trusted addresses. |
+| `tasks/main.yml` | Steps below. |
+| `handlers/main.yml` | Restarts fail2ban when the jail file changes. |
+
+What `tasks/main.yml` does:
+
+1. Reads the SSH port from the live session, so a non-standard port is handled.
+2. Refuses to continue if the ban settings are not positive numbers or the
+   trusted addresses are not a list.
+3. Installs `fail2ban`, `python3-systemd` and `nftables`. If the repositories
+   cannot supply them the run fails; protection is never skipped quietly.
+4. Writes the jail to `/etc/fail2ban/jail.d/99-ansible-sshd.local`.
+5. Tests the whole fail2ban configuration (`fail2ban-client -t`), then enables
+   and starts the service.
+6. Applies the restart if one is pending and confirms the `sshd` jail is
+   running (`fail2ban-client status sshd`).
+
+### `roles/automatic_updates/`
+
+`tasks/main.yml` only picks the file for the operating system.
+
+| File | What it sets up |
+|---|---|
+| `tasks/ubuntu.yml` | Installs `unattended-upgrades` and writes `/etc/apt/apt.conf.d/99-ansible-security-upgrades`: only the security and ESM security origins, package lists refreshed and upgrades applied daily, no automatic reboot, unused dependencies left in place. Enables `apt-daily.timer` and `apt-daily-upgrade.timer`. |
+| `tasks/rhel.yml` | Installs `dnf-automatic` and writes `/etc/dnf/automatic.conf`: security updates only, downloaded and applied, never rebooting. Turns off the three other dnf-automatic timers so only `dnf-automatic-install.timer` runs. |
+
+This role has no variables: the behaviour is fixed in the two task files.
+
+### `tests/`
+
+Both scripts run on the machine you work from and change nothing on it.
+
+| Script | What it proves | Needs |
+|---|---|---|
+| `validate_environments.py` | For dev, UAT and prod in turn: the inventory contains exactly its own two servers, each variable resolves to the value in the table below, and the playbook passes a syntax check. | Python with `ansible-core` |
+| `validate_local.py` | Every YAML file parses. The rendered SSH block is valid, takes effect for `ubuntu`, `ec2-user` and `root` even when a later `Include` says otherwise, and a conflicting `Match` block is detected. The APT settings parse and contain the security origin with reboots off. The jail template renders a custom port and trusted address correctly. | PyYAML, Jinja2, OpenSSH (`sshd`, `ssh-keygen`), `apt-config`; in practice a Linux machine |
+
+```bash
+python tests/validate_environments.py
+python tests/validate_local.py
+```
+
+Neither replaces a run against a real canary server.
+
+### `VALIDATION.md`
+
+A record of the checks run on this copy before it was delivered, and a list of
+what was not tested: no real EC2 server was hardened, no ban was triggered, and
+no update was installed.
+
 ## Prerequisites
 
 1. Install `ansible-core` in a controller environment compatible with your
